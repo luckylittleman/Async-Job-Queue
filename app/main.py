@@ -3,7 +3,8 @@ from sqlalchemy.orm import Session
 from .database import get_db
 from .schemas import JobCreate, JobOut
 from .models import Job
-
+from .job_queue import job_queue
+from .worker import execute_job
 app=FastAPI()
 
 @app.post("/jobs", response_model=JobOut, status_code=201)
@@ -16,6 +17,7 @@ def create_job(job:JobCreate, db:Session=Depends(get_db)):
     db.add(new_job)
     db.commit()
     db.refresh(new_job)
+    job_queue.enqueue(execute_job,new_job.id)
     return new_job
 
 @app.get("/jobs/{id}", response_model=JobOut)
