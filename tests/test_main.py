@@ -22,6 +22,11 @@ def test_job_retrival():
     assert data2["status"] == "pending"
     assert data2["id"] == get_id
 
+def test_job_with_non_exitent_id():
+    response=client.get("/jobs/0")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job not found"
+
 
 
    
