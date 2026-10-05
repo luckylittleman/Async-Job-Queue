@@ -5,7 +5,25 @@ from .schemas import JobCreate, JobOut
 from .models import Job
 from .job_queue import job_queue
 from .worker import execute_job
+import threading
+from rq import SimpleWorker
+from rq.timeouts import TimerDeathPenalty
+from .job_queue import redis_conn
+
+
 app=FastAPI()
+class ThreadSafeWorker(SimpleWorker):
+    death_penalty_class = TimerDeathPenalty
+
+def start_worker():
+    worker = ThreadSafeWorker(["default"], connection=redis_conn)
+    worker._install_signal_handlers = lambda: None
+    worker.work()
+
+@app.on_event("startup")
+def startup_event():
+    thread = threading.Thread(target=start_worker, daemon=True)
+    thread.start()
 
 @app.post("/jobs", response_model=JobOut, status_code=201)
 def create_job(job:JobCreate, db:Session=Depends(get_db)):
