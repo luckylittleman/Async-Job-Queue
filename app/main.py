@@ -25,6 +25,10 @@ def startup_event():
     thread = threading.Thread(target=start_worker, daemon=True)
     thread.start()
 
+@app.get("/")
+def project_root():
+    return {"message":"Welcome to the Async-Job-Queue backend, head over to /docs to view the endpoints"}
+
 @app.post("/jobs", response_model=JobOut, status_code=201)
 def create_job(job:JobCreate, db:Session=Depends(get_db)):
     new_job=Job(
