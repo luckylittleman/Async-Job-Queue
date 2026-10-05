@@ -3,13 +3,13 @@
 A FastAPI + PostgreSQL + Redis/RQ system for submitting background jobs and tracking their status via a job ID — the classic producer/consumer pattern. Built to learn async task processing, worker-based architectures, and the concurrency problems that come with multiple workers pulling from a shared queue.
 
 **Repo:** https://github.com/luckylittleman/async-job-queue
-**Live demo:** [URL — pending deployment]
+**Live demo:** https://async-job-queue-v4it.onrender.com/docs
 *(Note: free-tier hosting may spin down when idle; the first request after inactivity can take a few seconds to respond.)*
 
 ## Features
 
 - Job submission and status tracking via a single resource (`/jobs`)
-- Background processing via a separate RQ worker process — fully decoupled from the API server
+- Background job processing via Redis/RQ, with the worker running as a background thread inside the same process as the API (see **Deployment Architecture** below for why)
 - Automatic retry logic with configurable `max_retries` per job
 - Full job lifecycle tracking: `pending` → `in_progress` → `completed`/`failed`, with timestamps for queue wait time and execution duration
 - Alembic migrations for schema versioning
@@ -24,7 +24,7 @@ A FastAPI + PostgreSQL + Redis/RQ system for submitting background jobs and trac
 - **Task Queue:** Redis + RQ (Redis Queue)
 - **Validation:** Pydantic
 - **Testing:** pytest, unittest.mock
-- **Deployment:** [Platform — e.g. Render]
+- **Deployment:** Render (Web Service), Neon (managed Postgres), Upstash (managed Redis)
 
 ## Database Schema
 
@@ -46,12 +46,23 @@ Every job shares the same structural shape regardless of what it actually does �
 
 *This project has no authentication layer — it's scoped around the job-processing pattern itself, not access control.*
 
+## Deployment Architecture
+
+The live demo runs as a **single Render Web Service** rather than the two-process setup (API + separate background worker) used locally. Render's free tier doesn't include a Background Worker service type, so the RQ worker runs as a **daemon thread inside the same FastAPI process**, started on app startup:
+
+- `SimpleWorker` (RQ's non-forking worker class) runs in a background `threading.Thread`, so job execution shares the process with the API server instead of forking a separate OS process per job.
+- RQ installs OS signal handlers by default (for graceful shutdown and job-timeout enforcement) — but Python only allows signal handlers to be registered from the **main thread**, which crashes immediately in a background thread. The fix: override `_install_signal_handlers` to a no-op, and swap RQ's default signal-based job timeout (`UnixSignalDeathPenalty`, which also calls `signal.signal()`) for RQ's thread-safe alternative, `TimerDeathPenalty` (originally built for Windows, where `SIGALRM` doesn't exist — it works equally well here).
+- Postgres and Redis are hosted separately (Neon and Upstash) rather than on Render's own managed databases, since Render's free tier only allows one active database instance per account, and that slot is already used by this project's predecessor (Expense Splitter).
+
+This is a deliberate, documented tradeoff for a free-tier demo deployment — not the architecture you'd choose for a real production system, where the API and worker should scale and fail independently. Locally, the project still runs as two separate processes (`uvicorn` + `rq worker`), which is the architecture reflected in the setup instructions below.
+
 ## Design Decisions & What I Learned
 
 - **Atomic job claiming vs. queue-based claiming:** initially designed a `SELECT ... FOR UPDATE SKIP LOCKED` pattern for workers to safely claim jobs directly from Postgres without racing each other. Once RQ was introduced, Redis itself guarantees only one worker pulls a given job ID off the queue, making that pattern unnecessary for this architecture — though it remains the correct approach for a design with no message broker at all.
 - **Separating orchestration from execution:** `execute_job` (status transitions, commits, retry logic) and `do_work` (the actual task) are deliberately separate functions. This wasn't just for cleanliness — it's what made the worker's failure and retry paths testable at all, since `do_work` can be mocked to force failures on demand instead of manually editing source code before each test run.
 - **Commit ordering matters for correctness, not just style:** status is committed to the database *before* any slow operation runs (e.g. `in_progress` before the actual work, `pending` before re-enqueuing a retry) — not after — so that any other process querying the job's status mid-flight sees accurate, real-time state rather than stale data.
 - **Async/await was a deliberate non-choice here:** this project's actual concurrency need is *across* jobs (multiple worker processes), not *within* a single job (no job here has multiple independent slow steps worth overlapping) — so the worker code is plain synchronous Python, and RQ's lack of native async support turned out not to matter for this scope.
+- **REST vs. TCP Redis endpoints are not interchangeable:** Upstash (and similar managed Redis providers) expose both a REST API (for HTTP-based SDKs) and a standard TCP connection string. RQ's Python client (`redis.from_url`) needs the TCP one (`rediss://default:...@host:6379`) — pointing it at REST credentials fails with a misleading connection error rather than an obvious "wrong endpoint type" message.
 
 ## Known Limitations / Next Steps
 
@@ -77,6 +88,7 @@ Every job shares the same structural shape regardless of what it actually does �
 4. Create a `.env` file in the project root:
    ```
    DATABASE_URL=postgresql://username:password@localhost:5432/job_queue_db
+   REDIS_URL=redis://localhost:6379
    ```
 
 5. Run the database migrations:
